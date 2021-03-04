@@ -6,6 +6,7 @@ import sqlalchemy
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship, sessionmaker, mapper, aliased
+from sqlalchemy import or_
 
 #from ORMObjects import *
 
@@ -131,14 +132,22 @@ class Message(Base):
 
 
     def export_dict(self):
+        if (self.sender is None or self.recipient is None):
+            return
         ret = {}
         ret['message_id'] = self.id
         ret['platform'] = self.sender.platform.platform_name
-        ret['sender_name'] = self.sender.display_name
-        ret['recipient_name'] = self.recipient.display_name
+        ret['id_sender_name'] = self.sender.display_name
+        ret['id_recipient_name'] = self.recipient.display_name
         ret['timestamp'] = str(self.timestamp)
         ret['content'] = self.message_text
 
+
+        if self.sender.person != None:
+            ret['sender_name'] = self.sender.person.name
+
+        if self.recipient.person != None:
+            ret['recipient_name'] = self.recipient.person.name
         return ret
 
 
@@ -578,8 +587,8 @@ identities = session.query(Identity).filter(Identity.display_name!='').all()
 len(identities)
 
 # just checks for alphabet and space in a string
-def is_name(name):
-    okay_chars = '.()-'
+def is_name(name): # might be better to just check for inclusion of a number... if it has a numnber, it's not a name
+    okay_chars = ".()-'"
     for c in name:
         if c.isalpha() or c.isspace() or c in okay_chars:
             continue
@@ -624,6 +633,60 @@ session.commit()
 
 # turns out many of the contacts are only in Apple Contacts... not google, for some reason... so
 # we got a vcard from apple ... and just threw it into google. Let them parse that for me. New CSV Has it all!
+
+# anyways, running this all seems to work now!
+# now it's just a matter of creating the data we want.
+
+
+engine = open_existing_database(Path.cwd().parent / 'db' / 'test4.sqlite3')
+
+Session = sessionmaker(bind=engine)
+session = Session()
+
+
+# Create a Pandas dataframe to show how this might work.
+
+# I don't know this orm...
+# could check is_self in the future
+me_identities = session.query(Identity).filter(or_(Identity.person_id == 86, Identity.person_id == 1)).all()
+me_id_ids = [iden.id for iden in me_identities]
+
+#now get all messages to or from these me_identities
+my_messages = session.query(Message).filter(or_(Message.from_identity_id.in_(me_id_ids), Message.to_identity_id.in_(me_id_ids)))
+
+msgList = []
+for message in my_messages:
+    msgList.append(message.export_dict())
+
+# for sentiment analysis
+from textblob import TextBlob
+
+msgList2 = []
+for msg in msgList:
+    if msg:
+        if msg['content'] and msg['content'] != '':
+            blob = TextBlob(msg['content'])
+            msg['polarity'] = blob.sentiment.polarity
+            msg['subjectivity'] = blob.sentiment.subjectivity
+            msg['word_count'] = len(blob.words)
+
+        if 'recipient_name' in msg.keys():
+            if msg['recipient_name'] in ['Michael Hoefer', 'Me']:
+                if 'sender_name' in msg.keys():
+                    msg['other_person'] = msg['sender_name']
+            else:
+                if 'recipient_name' in msg.keys():
+                    msg['other_person'] = msg['recipient_name']
+
+        msgList2.append(msg)
+
+import pandas as pd
+
+df = pd.DataFrame(msgList2)
+df.to_csv('testing_output_v4.csv')
+
+
+
 
 
 
