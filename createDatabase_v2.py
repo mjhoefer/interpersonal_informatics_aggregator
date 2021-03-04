@@ -14,6 +14,12 @@ import datetime
 # for automated string parsing of dates with UTC offset
 from dateutil.parser import parse
 
+# for contact parsing in csv
+import csv
+
+# for parsing phone numbers into the google voice style
+import re
+
 
 # for facebook message parsing with json
 import json
@@ -371,7 +377,7 @@ export_folder = dir_to_scan.parent / 'exports'
 # find google folder
 google_folder = export_folder / 'google'
 
-folder_to_parse = google_folder / 'takeout-20200917T190112Z-001'
+folder_to_parse = google_folder / 'takeout'
 
 #load_google_voice_export(folder_to_parse, session, file_limit = 2000)
 load_google_voice_export(folder_to_parse, session)
@@ -469,6 +475,184 @@ for i, dir in enumerate(dirs):
 session.commit()
 
 
+# PARSING GOOGLE CONTACT INFO
+# PLAN: put the contact pieces of information in as separate identities
+# then run an algorithm to create "people" from identities based on the display name or something,
+# and then if the person already exists, simply link them together.
+
+
+contact_folder = google_folder / 'takeout' / 'Takeout'/ 'Contacts' / 'All Contacts'
+contact_file = contact_folder / 'All Contacts.csv'
+
+# dict reader should do the trick
+contacts = {}  # a dict where the key is the name, and the value is a dict with the juicy contact deets
+
+
+# a helper function that will ensure we don't overwrite values in the contact dict
+# if we have duplicate contacts, that have the same field (ie, both have "email 1",
+# then this function will update the contact dict with a modified key (_dup_i) where i is the
+# number of duplicates for this contact. Just ensures we don't overwrite any data.
+def update_contact_dict(c_dict, new_key, new_value):
+
+    #if empty value, don't update anything
+    if new_value == '':
+        return
+
+    if new_key not in c_dict.keys():
+        c_dict[new_key] = new_value
+        return
+
+    # no need to create duplicate values
+    if new_value in c_dict.values():
+        return
+
+    test_key = new_key
+    i = 1
+    while test_key in c_dict.keys():
+        test_key = new_key + "_dup_" + str(i)
+        i = i + 1
+    c_dict[test_key] = new_value
+    return
+
+# this will format the phone in the style of google voice, to make it easy to match and merge identities
+# the format is tel:+13038196688
+def format_phone(phone_num):
+    phone_digit_list = re.findall('[0-9]+', phone_num)
+    phone_digits = "".join(phone_digit_list)
+
+    num_digits = len(phone_digits)
+
+    if num_digits == 10:
+        # just add the 1 and call it good
+        return 'tel:+1' + phone_digits
+    elif num_digits > 10:
+        # we have enough digits, just add the tel:+
+        return 'tel:+' + phone_digits
+    return "" ## not enough digits, must be 319 area code LOL
+
+## This section may break depending on the google voice contacts CSV file
+## The number of phone_i may change. i could be more or less than is here...
+## TODO fix this
+with open(contact_file, 'r', encoding='utf-8') as infile:
+    readr = csv.DictReader(infile)
+    for row in readr:
+        if row['Name'] == "":
+            ## no name, generally just email junk, we can ignore it.
+            continue
+        # check for duplicates of names
+        if not row['Name'] in contacts.keys():
+            # name does not exist, so make a new contact dict
+            contacts[row['Name']] = {}
+        update_contact_dict(contacts[row['Name']], 'email_1', row['E-mail 1 - Value'])
+        update_contact_dict(contacts[row['Name']], 'email_2', row['E-mail 2 - Value'])
+        update_contact_dict(contacts[row['Name']], 'phone_1', format_phone(row['Phone 1 - Value']))
+        update_contact_dict(contacts[row['Name']], 'phone_2', format_phone(row['Phone 2 - Value']))
+        update_contact_dict(contacts[row['Name']], 'phone_3', format_phone(row['Phone 3 - Value']))
+        update_contact_dict(contacts[row['Name']], 'phone_4', format_phone(row['Phone 4 - Value']))
+        update_contact_dict(contacts[row['Name']], 'phone_5', format_phone(row['Phone 5 - Value']))
+
+# END CONTACT CSV PARSING
+# the contacts dict has all the info we might want
+
+# make the google contact platform
+goog_contact_platform = verify_or_make_platform("Google Contacts", session)
+
+# now we can create a bunch of identities for each contact
+for c_name, contact in contacts.items():
+    # loop through each contact information
+    for c_key, c_val in contact.items():
+        # make the new identity, one per kvp
+        new_id = Identity(platform=goog_contact_platform, id_string=c_val, display_name=c_name)
+        session.add(new_id)
+
+session.commit()
+
+## Sweet, we now have a ton of identities that should match.
+
+# Next, let's go through each identity, and make People for each identity
+
+# first, grab all the identities from the database
+# need to go look up how to query sqlalchemey again..
+
+identities = session.query(Identity).filter(Identity.display_name!='').all()
+len(identities)
+
+# just checks for alphabet and space in a string
+def is_name(name):
+    okay_chars = '.()-'
+    for c in name:
+        if c.isalpha() or c.isspace() or c in okay_chars:
+            continue
+        else:
+            return False
+    return True
+
+
+# loop through and create people for identities that have real display names
+for identity in identities:
+    # check if the display_name is a legit name
+    if is_name(identity.display_name):
+        # check if the person already exists
+        person_obj = session.query(Person).filter(Person.name == identity.display_name).first()
+        if person_obj:
+            # okay, the person already exists, so just link the identity to that person
+            identity.person = person_obj
+        else:
+            new_person = Person(name=identity.display_name, is_self = False)
+            session.add(new_person)
+            session.commit()
+            identity.person = new_person
+
+session.commit()
+
+# next, go through and check to see if a id_string matches another id_string, that has a person attached
+# then attach the first identity to that same person
+
+# first grab all IDs with no match
+unmatched_ids = session.query(Identity).filter(Identity.person_id == None).all()
+
+
+for identity in unmatched_ids:
+    # look for a match
+    potential_mate = session.query(Identity).filter(Identity.person_id != None, Identity.id_string==identity.id_string).first()
+    if potential_mate:
+        print ("Found a mate for ", identity.id_string, " and its ", potential_mate.person.name)
+        identity.person = potential_mate.person
+
+session.commit()
+
+
+# turns out many of the contacts are only in Apple Contacts... not google, for some reason... so
+# we got a vcard from apple ... and just threw it into google. Let them parse that for me. New CSV Has it all!
+
+
+
+exit()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### WTF Was I trying to do below.
 
 ### HANDLING OF DUPLICATES
 import sqlite3
@@ -551,8 +735,8 @@ for dup in dups:
 
 session.commit()
 
-    new_person = Person(name = dup.display_name)
-    session.add(new_person)
+new_person = Person(name = dup.display_name)
+session.add(new_person)
 
 
 
