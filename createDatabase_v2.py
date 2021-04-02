@@ -672,18 +672,34 @@ for msg in msgList:
 
         if 'recipient_name' in msg.keys():
             if msg['recipient_name'] in ['Michael Hoefer', 'Me']:
+                msg['recipient_name'] = "Me"
+                msg['sent_or_recieved'] = 'recieved'
                 if 'sender_name' in msg.keys():
                     msg['other_person'] = msg['sender_name']
             else:
+                msg['sent_or_recieved'] = 'sent'
+                msg['sender_name'] = "Me"
                 if 'recipient_name' in msg.keys():
                     msg['other_person'] = msg['recipient_name']
+        if "other_person" in msg.keys():
+            # we'll export this message
+            # but first delete the message content
+            msg.pop('content', None)
+            msgList2.append(msg)
 
-        msgList2.append(msg)
+# clearing out unwanted fields for the d3 viz
+for msg in msgList2:
+    msg.pop('message_id', None)
+    msg.pop('id_sender_name', None)
+    msg.pop('id_recipient_name', None)
+    msg.pop('sender_name', None)
+    msg.pop('recipient_name', None)
+
 
 import pandas as pd
 
 df = pd.DataFrame(msgList2)
-df.to_csv('testing_output_v4.csv')
+df.to_csv('testing_output_v8.csv', index=False)
 
 
 
